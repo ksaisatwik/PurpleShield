@@ -1,215 +1,201 @@
-from scapy.all import sniff
-from scapy.layers.inet import IP, TCP, UDP, ICMP
-from colorama import Fore, init
-from datetime import datetime
+from scapy.all import *
 from collections import defaultdict
+from colorama import Fore, Style, init
+import time
+import csv
+import os
 
 init(autoreset=True)
 
-print(Fore.GREEN + "=" * 70)
-print(Fore.GREEN + "PurpleShield - Smart Traffic Analyzer")
-print(Fore.GREEN + "=" * 70)
+# =========================================================
+# CREATE LOG FILES
+# =========================================================
 
-# -----------------------------
-# Protocol Counters
-# -----------------------------
-tcp_count = 0
-udp_count = 0
-icmp_count = 0
+if not os.path.exists("attack_logs.csv"):
+    with open("attack_logs.csv", "w", newline="") as file:
+        writer = csv.writer(file)
+        writer.writerow(["Time", "Attack Type", "Source IP"])
+
+if not os.path.exists("attack_logs.txt"):
+    open("attack_logs.txt", "w").close()
+
+# =========================================================
+# PACKET COUNTERS
+# =========================================================
+
 total_packets = 0
+tcp_packets = 0
+udp_packets = 0
+icmp_packets = 0
 
-# -----------------------------
-# Port Scan Detection
-# -----------------------------
-scan_tracker = defaultdict(set)
-SCAN_THRESHOLD = 10
+# =========================================================
+# ATTACK TRACKING
+# =========================================================
 
-# -----------------------------
-# SYN Flood Detection
-# -----------------------------
-syn_tracker = defaultdict(int)
-SYN_THRESHOLD = 20
+syn_count = defaultdict(int)
+port_scan = defaultdict(set)
 
-# -----------------------------
-# Blocked IP Tracking
-# -----------------------------
-blocked_ips = set()
+# =========================================================
+# LOGGING FUNCTION
+# =========================================================
 
-# -----------------------------
-# Alert Tracking
-# -----------------------------
-scan_alerted_ips = set()
-syn_alerted_ips = set()
+def log_attack(attack_type, src_ip):
 
+    # TXT LOG
+    with open("attack_logs.txt", "a") as log:
+        log.write(f"{time.ctime()} - {attack_type} from {src_ip}\n")
 
-# -----------------------------
-# Simulated Blocking Function
-# -----------------------------
-def block_ip(ip):
+    # CSV LOG
+    with open("attack_logs.csv", "a", newline="") as file:
+        writer = csv.writer(file)
+        writer.writerow([
+            time.ctime(),
+            attack_type,
+            src_ip
+        ])
 
-    if ip not in blocked_ips:
+# =========================================================
+# PACKET PROCESSING
+# =========================================================
 
-        blocked_ips.add(ip)
-
-        print(
-            Fore.RED +
-            f"\n[BLOCKED] Attacker IP blocked: {ip}"
-        )
-
-
-# -----------------------------
-# Packet Processing Function
-# -----------------------------
 def process_packet(packet):
 
-    global tcp_count
-    global udp_count
-    global icmp_count
     global total_packets
+    global tcp_packets
+    global udp_packets
+    global icmp_packets
 
     total_packets += 1
 
-    timestamp = datetime.now().strftime("%H:%M:%S")
+    print("=" * 70)
 
-    if IP in packet:
+    # =====================================================
+    # IP LAYER
+    # =====================================================
 
-        src_ip = packet[IP].src
-        dst_ip = packet[IP].dst
+    if packet.haslayer(IP):
 
-        print(Fore.BLUE + "\n" + "=" * 70)
-        print(Fore.YELLOW + f"Time             : {timestamp}")
-        print(Fore.CYAN + f"Source IP        : {src_ip}")
-        print(Fore.MAGENTA + f"Destination IP   : {dst_ip}")
+        ip_layer = packet[IP]
 
-        # -----------------------------
-        # TCP TRAFFIC
-        # -----------------------------
+        src_ip = ip_layer.src
+        dst_ip = ip_layer.dst
+
+        protocol = "OTHER"
+
+        src_port = "N/A"
+        dst_port = "N/A"
+
+        # =================================================
+        # TCP
+        # =================================================
+
         if packet.haslayer(TCP):
 
-            tcp_count += 1
+            tcp_packets += 1
+            protocol = "TCP"
 
-            sport = packet[TCP].sport
-            dport = packet[TCP].dport
+            src_port = packet[TCP].sport
+            dst_port = packet[TCP].dport
 
-            print(Fore.GREEN + "Protocol         : TCP")
-            print(Fore.WHITE + f"Source Port      : {sport}")
-            print(Fore.WHITE + f"Destination Port : {dport}")
+            flags = packet[TCP].flags
 
-            # -----------------------------
-            # SYN Flood Detection Logic
-            # -----------------------------
-            tcp_flags = packet[TCP].flags
+            # =================================================
+            # SYN FLOOD DETECTION
+            # =================================================
 
-            if tcp_flags == "S":
+            if "S" in str(flags):
 
-                syn_tracker[src_ip] += 1
+                syn_count[src_ip] += 1
 
-                if (
-                    syn_tracker[src_ip] > SYN_THRESHOLD
-                    and src_ip not in syn_alerted_ips
-                ):
+                if syn_count[src_ip] > 5:
 
-                    syn_alerted_ips.add(src_ip)
+                    print(Fore.RED + "[!!!] POSSIBLE SYN FLOOD DETECTED")
+                    print(Fore.RED + f"Attacker IP : {src_ip}")
+                    print(Fore.RED + f"SYN Count   : {syn_count[src_ip]}")
 
-                    print(
-                        Fore.RED +
-                        "\n[!!!] POSSIBLE SYN FLOOD DETECTED"
-                    )
+                    log_attack("SYN Flood", src_ip)
 
-                    print(
-                        Fore.RED +
-                        f"Attacker IP      : {src_ip}"
-                    )
+            # =================================================
+            # PORT SCAN DETECTION
+            # =================================================
 
-                    print(
-                        Fore.RED +
-                        f"SYN Packets      : {syn_tracker[src_ip]}"
-                    )
+            port_scan[src_ip].add(dst_port)
 
-                    block_ip(src_ip)
+            if len(port_scan[src_ip]) > 3:
 
-            # -----------------------------
-            # Port Scan Detection Logic
-            # -----------------------------
-            scan_tracker[src_ip].add(dport)
+                print(Fore.YELLOW + "[!!!] POSSIBLE PORT SCAN DETECTED")
+                print(Fore.YELLOW + f"Attacker IP  : {src_ip}")
+                print(Fore.YELLOW + f"Ports Scanned: {len(port_scan[src_ip])}")
 
-            if (
-                len(scan_tracker[src_ip]) > SCAN_THRESHOLD
-                and src_ip not in scan_alerted_ips
-            ):
+                log_attack("Port Scan", src_ip)
 
-                scan_alerted_ips.add(src_ip)
+            # =================================================
+            # SUSPICIOUS PORTS
+            # =================================================
 
-                print(
-                    Fore.RED +
-                    "\n[!!!] POSSIBLE PORT SCAN DETECTED"
-                )
+            suspicious_ports = [21, 22, 23, 3389]
 
-                print(
-                    Fore.RED +
-                    f"Attacker IP      : {src_ip}"
-                )
+            if dst_port in suspicious_ports:
 
-                print(
-                    Fore.RED +
-                    f"Ports Scanned    : {len(scan_tracker[src_ip])}"
-                )
+                print(Fore.MAGENTA + "[!] Suspicious Destination Port Detected")
 
-                block_ip(src_ip)
+        # =================================================
+        # UDP
+        # =================================================
 
-            # -----------------------------
-            # Suspicious Ports
-            # -----------------------------
-            suspicious_ports = [22, 23, 3389, 4444]
-
-            if dport in suspicious_ports:
-
-                print(
-                    Fore.RED +
-                    "[!] Suspicious Destination Port Detected"
-                )
-
-        # -----------------------------
-        # UDP TRAFFIC
-        # -----------------------------
         elif packet.haslayer(UDP):
 
-            udp_count += 1
+            udp_packets += 1
+            protocol = "UDP"
 
-            sport = packet[UDP].sport
-            dport = packet[UDP].dport
+            src_port = packet[UDP].sport
+            dst_port = packet[UDP].dport
 
-            print(Fore.YELLOW + "Protocol         : UDP")
-            print(Fore.WHITE + f"Source Port      : {sport}")
-            print(Fore.WHITE + f"Destination Port : {dport}")
+        # =================================================
+        # ICMP
+        # =================================================
 
-        # -----------------------------
-        # ICMP TRAFFIC
-        # -----------------------------
         elif packet.haslayer(ICMP):
 
-            icmp_count += 1
+            icmp_packets += 1
+            protocol = "ICMP"
 
-            print(Fore.RED + "Protocol         : ICMP")
+        # =================================================
+        # FORCE LOGGING FOR TESTING
+        # =================================================
 
-        # -----------------------------
-        # LIVE STATISTICS
-        # -----------------------------
-        print(Fore.GREEN + "\nPacket Statistics")
-        print(Fore.GREEN + "-" * 30)
+        log_attack("Traffic Detected", src_ip)
 
-        print(Fore.WHITE + f"Total Packets : {total_packets}")
-        print(Fore.WHITE + f"TCP Packets   : {tcp_count}")
-        print(Fore.WHITE + f"UDP Packets   : {udp_count}")
-        print(Fore.WHITE + f"ICMP Packets  : {icmp_count}")
+        # =================================================
+        # DISPLAY OUTPUT
+        # =================================================
 
-        print(Fore.BLUE + "=" * 70)
+        print(Fore.CYAN + f"Time             : {time.strftime('%H:%M:%S')}")
+        print(Fore.GREEN + f"Source IP        : {src_ip}")
+        print(Fore.GREEN + f"Destination IP   : {dst_ip}")
+        print(Fore.YELLOW + f"Protocol         : {protocol}")
+        print(Fore.BLUE + f"Source Port      : {src_port}")
+        print(Fore.BLUE + f"Destination Port : {dst_port}")
 
+        print(Fore.WHITE + "Packet Statistics")
+        print("-" * 30)
 
-print(Fore.YELLOW + "\n[*] Starting live traffic monitoring...\n")
+        print(Fore.CYAN + f"Total Packets : {total_packets}")
+        print(Fore.GREEN + f"TCP Packets   : {tcp_packets}")
+        print(Fore.YELLOW + f"UDP Packets   : {udp_packets}")
+        print(Fore.MAGENTA + f"ICMP Packets  : {icmp_packets}")
 
-sniff(
-    iface="lo",
-    prn=process_packet,
-    store=False
-)
+    print("=" * 70)
+
+# =========================================================
+# MAIN
+# =========================================================
+
+print(Fore.MAGENTA + "=" * 70)
+print(Fore.MAGENTA + "PurpleShield - Smart Traffic Analyzer")
+print(Fore.MAGENTA + "=" * 70)
+
+print(Fore.GREEN + "[*] Starting live traffic monitoring...")
+print(Fore.MAGENTA + "=" * 70)
+
+sniff(prn=process_packet, store=False)
